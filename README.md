@@ -1,1 +1,1 @@
-# Malaria-csusalPathway
+# Malaria-causalPathway

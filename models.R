@@ -181,7 +181,7 @@ bclmF <- function(b, x, y) {
 #     second element - to \alpha_2, third element - to \gamma, and all the rest
 #     to \beta.
 # x - design matrix of  size n x p, where p is the number of linear predictors.
-# y - vector of responses, assume dto be integers in \{1, 2, 3\}.
+# y - vector of responses, assumed to be integers in \{1, 2, 3\}.
 #
 #   Return value:
 # Vector of gradients for the log-likelihood function.
@@ -271,7 +271,7 @@ bclmRestricted <- function(formula, data, weights = NULL, maxit = 1000, model = 
   y <- as.numeric(y) # we convert response to numeric values
   mt <- attr(mf, "terms")
   x <- model.matrix(mt, mf) # this is the design matrix, it may include an intercept
-  stopifnot(attr(mt, "intercept") == 1)
+  stopifnot(attr(mt, "intercept") == 1) # we require intercept in the model
   if(attr(mt, "intercept") == 1) { # we drop the intercept column - it will be implicitly used
     x <- x[, colnames(x) != "(Intercept)", drop = FALSE]
   }
@@ -285,7 +285,8 @@ bclmRestricted <- function(formula, data, weights = NULL, maxit = 1000, model = 
                   x = x, y = y,
                   method = "L-BFGS-B",
                   lower = ll, upper = ul,
-                  control = list(fnscale = -1, maxit = maxit))
+                  control = list(fnscale = -1, maxit = maxit),
+                  hessian = FALSE)
   if(oresG$convergence != 0){
     warning(sprintf("L-BFGS-B didn't converge: %s", oresG$message))
   }
@@ -298,7 +299,15 @@ bclmRestricted <- function(formula, data, weights = NULL, maxit = 1000, model = 
   oresG$terms <- mt
   if (model) 
     oresG$model <- mf
-  # set the class of the result - necessary for logLik, coef and predict functions
+  # add fisher information matrix - for SE computation
+  oresG$fisher.information <- -bclmH(oresG$par, x, y)
+  # add some info similar to that of glm models
+  oresG$df.null <- nrow(x) - 2 # we have two intercepts
+  oresG$df.residual <- nrow(x) - length(oresG$par)
+  oresG$deviance <- -2 * oresG$value
+  #oresG$null.deviance <- TODO: add estimation of the null model - the one with intercepts only
+  oresG$aic <- 2 * (length(oresG$par) - oresG$value)
+  # set the class of the result - necessary for logLik, coef, summary and predict functions
   class(oresG) <- c("bclmRestricted", class(oresG))
   #names(ores$par) <- names(b)
   oresG
@@ -313,6 +322,67 @@ logLik.bclmRestricted <- function(object) {
 
 coef.bclmRestricted <- function(object) {
   object$par
+}
+
+# Compute the summary object for the restricted bclm model.
+#
+#   Parameters:
+# object - an object of class bclmRestricted.
+summary.bclmRestricted <- function(object) {
+  res <- list(call = object$call,
+              logLik = logLik(object),
+              aic = object$aic,
+              deviance = object$deviance,
+              df.residual = object$df.residual,
+              linear.predictors = colnames(object$fitted.logits))
+  beta <- coef(object)
+  se <- sqrt(diag(MASS::ginv(object$fisher.information)))
+  zvalue <- beta / se
+  pvalue <- 2 * pnorm(-abs(zvalue))
+  res$coefficients <- cbind(Estimate = beta,
+                            `Std. Error` = se,
+                            `z value` = zvalue,
+                            `Pr(>|z|)` = pvalue)
+  class(res) <- c("summary.bclmRestricted", class(res))
+  res
+}
+
+print.summary.bclmRestricted <- function(x,
+                                         digits = max(3, getOption("digits") - 3),
+                                         signif.stars = getOption("show.signif.stars"),
+                                         tol = (.Machine$double.eps)^0.25) {
+  cat("Call:\n")
+  print(x$call)
+  cat("\nCoefficients:\n")
+  m <- x$coefficients
+  if(signif.stars) {
+    md <- data.frame(m)
+    md[[1]] <- round(md[[1]], digits = 6)
+    md[[2]] <- round(md[[2]], digits = 6)
+    md[[3]] <- round(md[[3]], digits = 3)
+    md[[4]] <- round(md[[4]], digits = 5)
+    names(md) <- colnames(m)
+    md[[5]] <- ' '
+    md[[5]][md[[4]] < 0.1] <- '.'
+    md[[5]][md[[4]] < 0.05] <- '*'
+    md[[5]][md[[4]] < 0.01] <- '**'
+    md[[5]][md[[4]] < 0.001] <- '***'
+    names(md)[5] <- ""
+    print(md)
+    cat("---\nSignif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1\n")
+  } else {
+    print(round(m, digits = digits))
+  }
+  cat("\n")
+  cat(paste("Names of linear predictors:",  paste(x$linear.predictors, collapse = ", "), "\n\n", sep = " "))
+  cat(sprintf("Residual deviance: %s on %s degrees of freedom\n\n", round(x$deviance, digits = digits), x$df.residual))
+  cat(sprintf("Log-likelihood: %s on %s degrees of freedom\n\n", round(x$logLik, digits = digits), x$df.residual))
+  cat(sprintf("AIC: %s\n\n", round(x$aic, digits = digits)))
+  if(x$coefficients["gamma", 1] < tol || 1 - x$coefficients["gamma", 1] < tol) {
+    cat("Gamma is close to the boundaries of [0, 1] interval. Standard errors may be unreliable.\n\n")
+  }
+  cat("Reference group is level 3 of the response.\n")
+  invisible(x)
 }
 
 predict.bclmRestricted <- function(object, newdata = NULL, type = c("link", "response", "terms")) {
@@ -534,9 +604,71 @@ soblmUnrestricted <- function (formula, data, weights = NULL) {
   class(ll) <- c("logLik", class(ll))
   # prepare the value to return
   res <- list(c3vsOther = c3vsOther, c2vsc1 = c2vsc1, L = L, fitted.values = fitted.values, logLik = ll)
-  # set the class of the result - necessary for logLik, coef and predict functions
+  # add some information for summary computations
+  res$aic <- 2 * 2 * ncol(x) - 2 * ll
+  res$deviance <- -2 * ll
+  res$df.residual <- nrow(x) - 2 * ncol(x)
+  res$linear.predictors <- colnames(L)
+  # set the class of the result - necessary for logLik, coef, summary and predict functions
   class(res) <- c("soblmUnrestricted", class(res))
   res
+}
+
+# Compute the summary object for the restricted soblm model.
+#
+#   Parameters:
+# object - an object of class soblmUnrestricted
+summary.soblmUnrestricted <- function(object) {
+  res <- list(call = object$call,
+              logLik = logLik(object),
+              aic = object$aic,
+              deviance = object$deviance,
+              df.residual = object$df.residual,
+              linear.predictors = object$linear.predictors)
+  s1 <- summary.glm(object$c2vsc1)$coefficients
+  rownames(s1) <- paste(rownames(s1), 1, sep = ":")
+  s2 <- summary.glm(object$c3vsOther)$coefficients
+  rownames(s2) <- paste(rownames(s2), 2, sep = ":")
+  idx <- as.vector(rbind(1:nrow(s1), nrow(s1) + (1:nrow(s2))))
+  s <- rbind(s1, s2)
+  s <- s[idx, ] # reorder rows
+  res$coefficients <- s
+  class(res) <- c("summary.soblmUnrestricted", class(res))
+  res
+}
+
+print.summary.soblmUnrestricted <- function(x,
+                                          digits = max(3, getOption("digits") - 3),
+                                          signif.stars = getOption("show.signif.stars"),
+                                          tol = (.Machine$double.eps)^0.25) {
+  cat("Call:\n")
+  print(x$call)
+  cat("\nCoefficients:\n")
+  m <- x$coefficients
+  if(signif.stars) {
+    md <- data.frame(m)
+    md[[1]] <- round(md[[1]], digits = 6)
+    md[[2]] <- round(md[[2]], digits = 6)
+    md[[3]] <- round(md[[3]], digits = 3)
+    md[[4]] <- round(md[[4]], digits = 5)
+    names(md) <- colnames(m)
+    md[[5]] <- ' '
+    md[[5]][md[[4]] < 0.1] <- '.  '
+    md[[5]][md[[4]] < 0.05] <- '*  '
+    md[[5]][md[[4]] < 0.01] <- '** '
+    md[[5]][md[[4]] < 0.001] <- '***'
+    names(md)[5] <- ""
+    print(md)
+    cat("---\nSignif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1\n")
+  } else {
+    print(round(m, digits = digits))
+  }
+  cat("\n")
+  cat(paste("Names of linear predictors:",  paste(x$linear.predictors, collapse = ", "), "\n\n", sep = " "))
+  cat(sprintf("Residual deviance: %s on %s degrees of freedom\n\n", round(x$deviance, digits = digits), x$df.residual))
+  cat(sprintf("Log-likelihood: %s on %s degrees of freedom\n\n", round(x$logLik, digits = digits), x$df.residual))
+  cat(sprintf("AIC: %s\n\n", round(x$aic, digits = digits)))
+  invisible(x)
 }
 
 logLik.soblmUnrestricted <- function(object) {
@@ -722,7 +854,8 @@ soblmRestricted <- function (formula, data, weights = NULL, maxit = 2000, lambda
                  x = x, y = y, lambda = lambda,
                  method = "L-BFGS-B",
                  lower = ll, upper = ul,
-                 control = list(fnscale = -1, maxit = maxit))
+                 control = list(fnscale = -1, maxit = maxit),
+                 hessian = TRUE)
   if(oresG$convergence != 0){
     warning(sprintf("L-BFGS-B didn't converge: %s", oresG$message))
   }
@@ -736,10 +869,80 @@ soblmRestricted <- function (formula, data, weights = NULL, maxit = 2000, lambda
   oresG$terms <- mt
   if (model) 
     oresG$model <- mf
+  ## add some info for summarization
+  # add fisher information matrix
+  oresG$fisher.information <- -oresG$hessian
+  oresG$hessian <- NULL
+  # add some info similar to that of glm models
+  oresG$df.null <- nrow(x) - 2 # we have two intercepts
+  oresG$df.residual <- nrow(x) - length(oresG$par)
+  oresG$deviance <- -2 * oresG$value
+  #oresG$null.deviance <- TODO: add estimation of the null model - the one with intercepts only
+  oresG$aic <- 2 * (length(oresG$par) - oresG$value)
   # set the class of the result - necessary for logLik, coef and predict functions
   class(oresG) <- c("soblmRestricted", class(oresG))
   #names(ores$par) <- names(b)
   oresG
+}
+
+# Compute the summary object for the restricted soblm model.
+#
+#   Parameters:
+# object - an object of class soblmRestricted
+summary.soblmRestricted <- function(object) {
+  res <- list(call = object$call,
+              logLik = logLik(object),
+              aic = object$aic,
+              deviance = object$deviance,
+              df.residual = object$df.residual,
+              linear.predictors = colnames(object$fitted.logits))
+  beta <- coef(object)
+  se <- sqrt(diag(MASS::ginv(object$fisher.information)))
+  zvalue <- beta / se
+  pvalue <- 2 * pnorm(-abs(zvalue))
+  res$coefficients <- cbind(Estimate = beta,
+                            `Std. Error` = se,
+                            `z value` = zvalue,
+                            `Pr(>|z|)` = pvalue)
+  class(res) <- c("summary.soblmRestricted", class(res))
+  res
+}
+
+print.summary.soblmRestricted <- function(x,
+                                         digits = max(3, getOption("digits") - 3),
+                                         signif.stars = getOption("show.signif.stars"),
+                                         tol = (.Machine$double.eps)^0.25) {
+  cat("Call:\n")
+  print(x$call)
+  cat("\nCoefficients:\n")
+  m <- x$coefficients
+  if(signif.stars) {
+    md <- data.frame(m)
+    md[[1]] <- round(md[[1]], digits = 6)
+    md[[2]] <- round(md[[2]], digits = 6)
+    md[[3]] <- round(md[[3]], digits = 3)
+    md[[4]] <- round(md[[4]], digits = 5)
+    names(md) <- colnames(m)
+    md[[5]] <- ' '
+    md[[5]][md[[4]] < 0.1] <- '.  '
+    md[[5]][md[[4]] < 0.05] <- '*  '
+    md[[5]][md[[4]] < 0.01] <- '** '
+    md[[5]][md[[4]] < 0.001] <- '***'
+    names(md)[5] <- ""
+    print(md)
+    cat("---\nSignif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1\n")
+  } else {
+    print(round(m, digits = digits))
+  }
+  cat("\n")
+  cat(paste("Names of linear predictors:",  paste(x$linear.predictors, collapse = ", "), "\n\n", sep = " "))
+  cat(sprintf("Residual deviance: %s on %s degrees of freedom\n\n", round(x$deviance, digits = digits), x$df.residual))
+  cat(sprintf("Log-likelihood: %s on %s degrees of freedom\n\n", round(x$logLik, digits = digits), x$df.residual))
+  cat(sprintf("AIC: %s\n\n", round(x$aic, digits = digits)))
+  if(x$coefficients["gamma", 1] < tol) {
+    cat("Gamma is close to 0. Standard errors may be unreliable.\n\n")
+  }
+  invisible(x)
 }
 
 logLik.soblmRestricted <- function(object) {
